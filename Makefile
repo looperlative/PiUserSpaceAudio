@@ -11,5 +11,5 @@ remote: t midit
 t: t.c bcmhw.h bcmhw.c
 	gcc -g -o t t.c bcmhw.c codec_lp1b.c -li2c
 
-midit: midit.c
-	gcc -g -o midit midit.c -lasound
+midit: pusamidi.c
+	gcc -g -DPUSAMIDI_UNIT_TEST -o midit $< -lasound

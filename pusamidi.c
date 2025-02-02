@@ -28,15 +28,12 @@
 
 pid_t gettid(void);
 
-#define MIDI_PORT_MAX	32
+#define PUSAMIDI_PORT_MAX	32
 
-static pthread_t midi_in_tids[MIDI_PORT_MAX];
-static int midi_in_num;
+static snd_rawmidi_t *pusamidi_outs[PUSAMIDI_PORT_MAX];
+static int pusamidi_out_num = 0;
 
-static snd_rawmidi_t *midi_outs[MIDI_PORT_MAX];
-static int midi_out_num = 0;
-
-void *midi_in_thread(void *arg)
+void *pusamidi_in_thread(void *arg)
 {
     snd_rawmidi_t *midiport;
     char *hwname = arg;
@@ -66,12 +63,34 @@ void *midi_in_thread(void *arg)
     return NULL;
 }
 
-void enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum)
+void pusamidi_thread_create(const char *hwname)
+{
+    pthread_t tid;
+    pthread_attr_t attr;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, pusamidi_in_thread, strdup(hwname));
+    pthread_attr_destroy(&attr);
+}
+
+void pusamidi_output_create(const char *hwname)
+{
+    if (pusamidi_out_num < PUSAMIDI_PORT_MAX &&
+	snd_rawmidi_open(NULL, &pusamidi_outs[pusamidi_out_num], hwname, SND_RAWMIDI_SYNC) >= 0)
+    {
+	printf("Out: %s\n", hwname);
+	pusamidi_out_num++;
+    }
+}
+
+void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum,
+				   snd_rawmidi_stream_t type, void (*func)(const char *s))
 {
     snd_rawmidi_info_t *info;
     snd_rawmidi_info_alloca(&info);
 
-    snd_rawmidi_info_set_stream(info, SND_RAWMIDI_STREAM_INPUT);
+    snd_rawmidi_info_set_stream(info, type);
     snd_rawmidi_info_set_device(info, devicenum);
     snd_ctl_rawmidi_info(ctld, info);
 
@@ -82,45 +101,20 @@ void enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum)
 	snd_ctl_rawmidi_info(ctld, info);
 	const char *name = snd_rawmidi_info_get_subdevice_name(info);
 
-	if (midi_in_num < MIDI_PORT_MAX)
-	{
-	    char hwname[100];
-	    sprintf(hwname, "hw:%d,%d,%d", cardnum, devicenum, i);
-	    pthread_create(&midi_in_tids[midi_in_num], NULL, midi_in_thread, strdup(hwname));
-	}
-    }
-
-    snd_rawmidi_info_set_stream(info, SND_RAWMIDI_STREAM_OUTPUT);
-    snd_rawmidi_info_set_device(info, devicenum);
-    snd_ctl_rawmidi_info(ctld, info);
-
-    n = snd_rawmidi_info_get_subdevices_count(info);
-    for (int i = 0; i < n; i++)
-    {
-	snd_rawmidi_info_set_subdevice(info, i);
-	snd_ctl_rawmidi_info(ctld, info);
-	const char *name = snd_rawmidi_info_get_subdevice_name(info);
-
 	char hwname[100];
 	sprintf(hwname, "hw:%d,%d,%d", cardnum, devicenum, i);
-
-	if (midi_out_num < MIDI_PORT_MAX &&
-	    snd_rawmidi_open(NULL, &midi_outs[midi_out_num], hwname, SND_RAWMIDI_SYNC) >= 0)
-	{
-	    printf("Out: hw:%d,%d,%d: %s\n", cardnum, devicenum, i, name);
-	    midi_out_num++;
-	}
+	func(hwname);
     }
 }
 
-int main(int argc, char **argv)
+void pusamidi_enumerate_devices(snd_rawmidi_stream_t type, void (*func)(const char *s))
 {
     int cardnum = -1;
     snd_ctl_t *ctld;
     char hwname[100];
 
     if (snd_card_next(&cardnum) < 0)
-	return 0;
+	return;
 
     while (cardnum >= 0)
     {
@@ -139,7 +133,7 @@ int main(int argc, char **argv)
 		    break;
 		if (devicenum >= 0)
 		{
-		    enumerate_subdevices(ctld, cardnum, devicenum);
+		    pusamidi_enumerate_subdevices(ctld, cardnum, devicenum, type, func);
 		}
 	    }
 	    while (devicenum >= 0);
@@ -148,8 +142,15 @@ int main(int argc, char **argv)
 	}
 
 	if (snd_card_next(&cardnum) < 0)
-	    return 0;
+	    return;
     }
+}
+
+#ifdef PUSAMIDI_UNIT_TEST
+int main(int argc, char **argv)
+{
+    pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_INPUT, pusamidi_thread_create);
+    pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_OUTPUT, pusamidi_output_create);
 
     while (1)
     {
@@ -157,3 +158,4 @@ int main(int argc, char **argv)
 
     return 0;
 }
+#endif
