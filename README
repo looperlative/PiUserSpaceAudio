@@ -1,0 +1,19 @@
+The purpose of this project is to create a user space framework for
+real-time audio processing.  While Linux kernel audio drivers are
+standard and overall very good.  They are subject to latency
+introduced by buffering audio and transitioning between kernel and
+user space.  On platforms such as the Raspberry Pi, there is often an
+I2S interface built into the SoC that provides a very low-latency
+connection between the processor and the CODEC.  Since 2005, I have
+been creating embedded software that uses these interfaces directly
+without an OS such as Linux.  However, there is a great advantage when
+creating new devices to use a standard OS such as Linux.  With the
+current use of inexpensive multicore SoC chips, we have an
+alternative.  We can create a real-time thread that consumes an entire
+CPU core similar to how DPDK works in the networking realm.  The code
+in this repository will become a library that can be shared and used
+by all to create devices with audio latency below 1 millisecond.  The
+current state is very rough, but does offer a starting point.
+Contributions from other developers will be accepted with appropriate
+code review.  Anything contributed must be license compatible with
+LGPLv3.

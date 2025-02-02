@@ -1,0 +1,104 @@
+pinctrl set 17 op dl
+bob@pizero:~ $ pinctrl set 17 op dh
+bob@pizero:~ $ sudo i2cd
+i2cdetect  i2cdump
+bob@pizero:~ $ sudo i2cdetect -y 1
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:                         -- -- -- -- -- -- -- --
+10: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+20: 20 -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+30: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+40: -- -- -- -- -- -- -- -- 48 -- -- -- -- -- -- --
+50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+70: -- -- -- -- -- -- -- --
+bob@pizero:~ $ sudo i2cget 1 0x20 0x00 w
+WARNING! This program can confuse your I2C bus, cause data loss and worse!
+I will read from device file /dev/i2c-1, chip address 0x20, data address
+0x00, using read word data.
+Continue? [Y/n]
+0xffff
+bob@pizero:~ $ sudo i2cget 1 0x48 0x01 w
+WARNING! This program can confuse your I2C bus, cause data loss and worse!
+I will read from device file /dev/i2c-1, chip address 0x48, data address
+0x01, using read word data.
+Continue? [Y/n]
+0xc3c3
+bob@pizero:~ $
+
+
+
+
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x01 b
+0xc3
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x02 b
+0x00
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x02 0x23
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x01 b
+0xc3
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x02 b
+0x23
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x03 0x00
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x04 0x09
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x05 0x60
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x06 0x00
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x07 0x00
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x08 0x00
+bob@pizero:~ $ sudo i2cset -y 1 0x48 0x02 0x00
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x01 b
+0xc3
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x02 b
+0x00
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x03 b
+0x00
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x04 b
+0x09
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x05 b
+0x60
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x06 b
+0x00
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x07 b
+0x00
+bob@pizero:~ $ sudo i2cget -y 1 0x48 0x08 b
+0x00
+bob@pizero:~ $
+
+LP2 AUDIO
+Pi Zero 2
+I2S CLK: 76efc098 (19): 00000200 00000000
+I2S CS:    02ffc027
+I2S MODE:  00f0fc20
+I2S RXC:   c018c218
+I2S TXC:   c018c218
+I2S DREQ:  10303020
+
+PISOUND
+Pi 4
+I2S CLK: f7ddf098 (19): 00000200 00000000
+I2S CS:    031c02a7
+I2S MODE:  00f0fc20
+I2S RXC:   c018c218
+I2S TXC:   c018c218
+I2S DREQ:  10303020
+
+A/D rst-	GPIO 12
+A/D osr0	GPIO 13		1
+A/D osr1	GPIO 26		0
+A/D osr2	GPIO 16		0
+
+SPI rst-	GPIO 24
+SPI data avail	GPIO 25
+SPI connected to UART for MIDI
+
+push button	GPIO 17
+
+linux-6.1.y/arch/arm/boot/overlays/pisound-overlay.dts
+linux-6.1.y/sound/soc/bcm/pisound.c
+
+sudo apt install libasound2-dev
+sudo apt install libi2c-dev
+
+
+To turn off I2S in Raspberry Pi put the following lines in /etc/modprobe.d/raspi-blacklist.conf
+blacklist snd_soc_pisound
+blacklist snd_soc_bcm2835_i2s
