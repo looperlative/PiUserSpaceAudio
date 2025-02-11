@@ -48,6 +48,7 @@ struct pusa_codec_s
 int pusa_rx_errors = 0;
 int pusa_tx_errors = 0;
 int pusa_tx_counter = 0;
+int pusa_tx_counter_at_first_found = 0;
 int pusa_prefill_count = 0;
 
 void *pusa_audio_thread(void *arg)
@@ -58,10 +59,21 @@ void *pusa_audio_thread(void *arg)
     sparam.sched_priority = 99;
     sched_setscheduler(gettid(), SCHED_FIFO, &sparam);
 
-    /* Remove RAM standby mode.  Doc isn't clear on whether this is required for the Pi Zero,
-       but we don't want to take a chance.
-    */
-    writel(PCM_CS_A, PCM_CS_STBY);
+    /*
+     * It is possible that we were running before and never stopped.  There is
+     * no reset bit, but we can stop the interface, wait, and then enable it again.
+     */
+    writel(PCM_CS_A, 0);
+    usleep(10000);
+
+    writel(PCM_CS_A, PCM_CS_EN);
+    usleep(10000);
+
+    /*
+     * Remove RAM standby mode.  Doc isn't clear on whether this is required for the Pi Zero,
+     * but we don't want to take a chance.
+     */
+    writel(PCM_CS_A, PCM_CS_STBY | PCM_CS_EN);
     usleep(1000);
 
     /*
@@ -90,7 +102,7 @@ void *pusa_audio_thread(void *arg)
 	   PCM_MODE_FSI | PCM_MODE_CLKI | PCM_MODE_FSM | PCM_MODE_CLKM |
 	   PCM_MODE_FLEN(63) | PCM_MODE_FSLEN(32));
 
-    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXTHR_LVL1);
+    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXTHR_LVL1 | PCM_CS_RXTHR_LVL1);
 
     /* Clear FIFOs */
     writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXCLR | PCM_CS_RXCLR);
@@ -122,16 +134,23 @@ void *pusa_audio_thread(void *arg)
 	    pusa_rx_errors++;
 	if (status & PCM_CS_TXERR)
 	    pusa_tx_errors++;
-	if (status & PCM_CS_RXD)
+	if (status & PCM_CS_RXR)
 	{
-	    first_found = 1;
+	    if (!first_found)
+	    {
+		pusa_tx_counter_at_first_found = pusa_tx_counter;
+		first_found = 1;
+	    }
 
 	    long data = readl(PCM_FIFO_A);
 	    writel(PCM_FIFO_A, data);
 	    pusa_tx_counter++;
 	}
 	else if (!first_found && (status & PCM_CS_TXW) != 0)
+	{
 	    writel(PCM_FIFO_A, 0);
+	    pusa_tx_counter++;
+	}
     }
 }
 
@@ -196,6 +215,7 @@ int pusa_init(const char *codec_name)
 
 void pusa_print_stats(void)
 {
-    printf("tx sends %d, tx errors %d, rx errors %d, prefill %d\n",
-	   pusa_tx_counter, pusa_tx_errors, pusa_rx_errors, pusa_prefill_count);
+    printf("tx sends %d (%d), tx errors %d, rx errors %d, prefill %d\n",
+	   pusa_tx_counter, pusa_tx_counter_at_first_found,
+	   pusa_tx_errors, pusa_rx_errors, pusa_prefill_count);
 }

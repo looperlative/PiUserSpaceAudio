@@ -25,8 +25,6 @@
 #include <sched.h>
 #include <pthread.h>
 #include <time.h>
-#include "bcmhw.h"
-#include "codec_lp1b.h"
 #include "pusa.h"
 
 int main()
