@@ -159,6 +159,7 @@ int bcmhw_init(void)
 
     close(mem_fd);
 
+#if 0
     unsigned long addr = CM_GPCTL(CM_I2S_CLOCK);
     printf("I2S CLK: %08x (%d): %08x %08x\n", addr, CM_I2S_CLOCK, readl(addr), readl(addr + 4));
     printf("I2S CS:    %08x\n", readl(PCM_CS_A));
@@ -167,6 +168,7 @@ int bcmhw_init(void)
     printf("I2S TXC:   %08x\n", readl(PCM_RXC_A));
     printf("I2S DREQ:  %08x\n", readl(PCM_DREQ_A));
     exit(1);
+#endif
 
     return 0;
 }

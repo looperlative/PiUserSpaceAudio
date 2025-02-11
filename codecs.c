@@ -23,12 +23,32 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include "linux/i2c.h"
-#include "linux/i2c-dev.h"
-#include "i2c/smbus.h"
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <i2c/smbus.h>
 
 #include "bcmhw.h"
-#include "codec_lp1b.h"
+#include "codecs.h"
+
+int codec_pisound_init(void)
+{
+    bcmhw_gpio_select(12, GPIO_FUNC_OUTPUT);
+    bcmhw_gpio_select(13, GPIO_FUNC_OUTPUT);
+    bcmhw_gpio_select(26, GPIO_FUNC_OUTPUT);
+    bcmhw_gpio_select(16, GPIO_FUNC_OUTPUT);
+
+    bcmhw_gpio_set(12, 0);
+    usleep(1000);
+
+    bcmhw_gpio_set(13, 1);
+    bcmhw_gpio_set(26, 0);
+    bcmhw_gpio_set(16, 0);
+
+    bcmhw_gpio_set(12, 1);
+    usleep(1000);
+
+    return 0;
+}
 
 int codec_lp1b_init(void)
 {
@@ -43,7 +63,6 @@ int codec_lp1b_init(void)
     bcmhw_gpio_set(17, 0);
     usleep(100);
     bcmhw_gpio_set(17, 1);
-    writel(GPSET0, 1 << 17);
     usleep(100);
 
     // Configure codec

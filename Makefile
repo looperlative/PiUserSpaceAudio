@@ -8,8 +8,8 @@ default:
 
 remote: t midit
 
-t: t.c bcmhw.h bcmhw.c
-	gcc -g -o t t.c bcmhw.c codec_lp1b.c -li2c
+t: t.c bcmhw.h bcmhw.c pusa.c codecs.c codecs.h pusa.h
+	gcc -g -o t t.c bcmhw.c codecs.c pusa.c -li2c
 
 midit: pusamidi.c
 	gcc -g -DPUSAMIDI_UNIT_TEST -o midit $< -lasound
