@@ -18,6 +18,9 @@
  * <https://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
+#include <sched.h>
+
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -25,9 +28,10 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <errno.h>
-#include <sched.h>
 #include <pthread.h>
 #include <time.h>
+#include <signal.h>
+
 #include "bcmhw.h"
 #include "codecs.h"
 #include "pusa.h"
@@ -47,13 +51,19 @@ struct pusa_codec_s
 
 int pusa_rx_errors = 0;
 int pusa_tx_errors = 0;
+int pusa_rx_counter = 0;
 int pusa_tx_counter = 0;
 int pusa_tx_counter_at_first_found = 0;
 int pusa_prefill_count = 0;
+int pusa_done = 0;
+pusa_audio_handler_t pusa_audio_handler = NULL;
 
 void *pusa_audio_thread(void *arg)
 {
-    printf("audio thread\n");
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(3, &cpus);
+    sched_setaffinity(0, sizeof(cpus), &cpus);
 
     struct sched_param sparam;
     sparam.sched_priority = 99;
@@ -120,9 +130,34 @@ void *pusa_audio_thread(void *arg)
 	pusa_prefill_count = i;
     }
 
-    int first_found = 0;
-
     while (1)
+    {
+	/*
+	 * Wait for read FIFO to have data.  Meanwhile, make certain that
+	 * write FIFO is kept full.
+	 */
+	unsigned long status = readl(PCM_CS_A);
+	writel(PCM_CS_A, status);
+
+	if (status & PCM_CS_RXERR)
+	    pusa_rx_errors++;
+	if (status & PCM_CS_TXERR)
+	    pusa_tx_errors++;
+	if (status & PCM_CS_RXR)
+	{
+	    break;
+	}
+	else if ((status & PCM_CS_TXW) != 0)
+	{
+	    writel(PCM_FIFO_A, 0);
+	    pusa_tx_counter++;
+	}
+    }
+
+    pusa_tx_counter_at_first_found = pusa_tx_counter;
+    pusa_tx_counter = 0;
+
+    while (!pusa_done)
     {
 	/*
 	 * Read FIFO if data available and the send to TX FIFO. Keep count of RX and TX errors.
@@ -136,20 +171,19 @@ void *pusa_audio_thread(void *arg)
 	    pusa_tx_errors++;
 	if (status & PCM_CS_RXR)
 	{
-	    if (!first_found)
-	    {
-		pusa_tx_counter_at_first_found = pusa_tx_counter;
-		first_found = 1;
-	    }
+	    int data[2];
 
-	    long data = readl(PCM_FIFO_A);
-	    writel(PCM_FIFO_A, data);
+	    data[0] = readl(PCM_FIFO_A);
+	    data[1] = readl(PCM_FIFO_A);
+
+	    if (pusa_audio_handler != NULL)
+		pusa_audio_handler(data, 2);
+
+	    writel(PCM_FIFO_A, data[0]);
+	    writel(PCM_FIFO_A, data[1]);
+
 	    pusa_tx_counter++;
-	}
-	else if (!first_found && (status & PCM_CS_TXW) != 0)
-	{
-	    writel(PCM_FIFO_A, 0);
-	    pusa_tx_counter++;
+	    pusa_rx_counter++;
 	}
     }
 }
@@ -168,13 +202,20 @@ struct pusa_codec_s *pusa_find_codec(const char *name)
     return NULL;
 }
 
-int pusa_init(const char *codec_name)
+int pusa_init(const char *codec_name, pusa_audio_handler_t func)
 {
+    pusa_audio_handler = func;
+
     /*
      * Disable run time limit on real-time thread.  By default, Linux
      * doesn't allow a real-time thread to comsume 100% of a CPU, but
      * in our case, we absolutely must have the audio thread consume
      * 100% of one core.
+     *
+     * If you don't do this, Linux interrupts the process once a second
+     * and pauses it for many milliseconds.  I don't know the exact amount
+     * of time, but by experimentation, it is long enough to drain the
+     * hardware FIFO.
      */
     FILE *fp = fopen("/proc/sys/kernel/sched_rt_runtime_us", "w");
     if (fp == NULL)
@@ -215,7 +256,7 @@ int pusa_init(const char *codec_name)
 
 void pusa_print_stats(void)
 {
-    printf("tx sends %d (%d), tx errors %d, rx errors %d, prefill %d\n",
-	   pusa_tx_counter, pusa_tx_counter_at_first_found,
+    printf("tx %d (%d), rx %d, tx errors %d, rx errors %d, prefill %d\n",
+	   pusa_tx_counter, pusa_tx_counter_at_first_found, pusa_rx_counter,
 	   pusa_tx_errors, pusa_rx_errors, pusa_prefill_count);
 }

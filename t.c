@@ -27,9 +27,13 @@
 #include <time.h>
 #include "pusa.h"
 
+void audio_handler(int *data, int nchannels)
+{
+}
+
 int main()
 {
-    if (pusa_init("pisound") < 0)
+    if (pusa_init("pisound", audio_handler) < 0)
     {
 	printf("Failed to init\n");
 	exit(1);
