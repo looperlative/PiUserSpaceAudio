@@ -102,7 +102,7 @@ static void pusamidi_close_port(char *hwname, snd_rawmidi_stream_t type)
 
 static int pusamidi_process_midi_in(unsigned char *buffer, int *len, unsigned char *last_cmd)
 {
-    if (buffer[*len-1] & 0x80)
+    if (*len > 1 && (buffer[*len-1] & 0x80) != 0 && !(buffer[0] == 0xf0 && buffer[*len-1] == 0xf7))
     {
 	buffer[0] = buffer[*len-1];
 	*len = 1;
@@ -184,9 +184,7 @@ static void *pusamidi_in_thread(void *arg)
 		    room += sizeof(pusamidi_in_fifo);
 		room -= 1;
 
-		if (room < n)
-		    printf("MIDI in FIFO full\n");
-		else
+		if (room > n)
 		{
 		    for (int i = 0; i < n; i++)
 		    {
@@ -348,10 +346,24 @@ int pusamidi_get_midi_in(void)
     return c;
 }
 
+void pusamidi_send_midi_out(const void *buffer, size_t len)
+{
+    for (int i = 0; i < PUSAMIDI_PORT_MAX; i++)
+    {
+	snd_rawmidi_t *handle = pusamidi_outs[i].midiport;
+	if (handle)
+	    snd_rawmidi_write(handle, buffer, len);
+    }
+}
+
 #ifdef PUSAMIDI_UNIT_TEST
 int main(int argc, char **argv)
 {
     pusamidi_init();
+
+    sleep(1);
+    unsigned char msg[6] = { 0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7 };
+    pusamidi_send_midi_out(msg, sizeof(msg));
 
     while (1)
     {
@@ -359,7 +371,7 @@ int main(int argc, char **argv)
 
 	if (c >= 0)
 	{
-	    if ((c & 0x80))
+	    if ((c & 0x80) && c != 0xf7)
 		printf("\n");
 
 	    printf("%02x ", c);
