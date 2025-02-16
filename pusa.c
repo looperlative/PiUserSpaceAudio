@@ -51,12 +51,39 @@ struct pusa_codec_s
 
 int pusa_rx_errors = 0;
 int pusa_tx_errors = 0;
+int pusa_stall_errors = 0;
 int pusa_rx_counter = 0;
 int pusa_tx_counter = 0;
 int pusa_tx_counter_at_first_found = 0;
 int pusa_prefill_count = 0;
 int pusa_done = 0;
 pusa_audio_handler_t pusa_audio_handler = NULL;
+
+static pthread_mutex_t pusa_stall_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int pusa_want_stall = 0;
+static volatile int pusa_stall_granted = 0;
+
+/*
+ * This is used to temporarily stall audio processing to avoid
+ * race conditions.  Care needs to be taken because stalling
+ * must be shorter than 8 sample times.
+ */
+void pusa_stall_rt(void)
+{
+    pthread_mutex_lock(&pusa_stall_lock);
+    pusa_want_stall = 1;
+    while (!pusa_stall_granted)
+	;
+}
+
+/*
+ * Resume audio processing in the RT thread.
+ */
+void pusa_unstall_rt(void)
+{
+    pusa_stall_granted = 0;
+    pthread_mutex_unlock(&pusa_stall_lock);
+}
 
 void *pusa_audio_thread(void *arg)
 {
@@ -150,6 +177,7 @@ void *pusa_audio_thread(void *arg)
 	else if ((status & PCM_CS_TXW) != 0)
 	{
 	    writel(PCM_FIFO_A, 0);
+	    writel(PCM_FIFO_A, 0);
 	    pusa_tx_counter++;
 	}
     }
@@ -157,8 +185,17 @@ void *pusa_audio_thread(void *arg)
     pusa_tx_counter_at_first_found = pusa_tx_counter;
     pusa_tx_counter = 0;
 
+    int data[16];
+    int ndata = 0;
+
     while (!pusa_done)
     {
+	if (pusa_want_stall)
+	{
+	    pusa_want_stall = 0;
+	    pusa_stall_granted = 1;
+	}
+
 	/*
 	 * Read FIFO if data available and the send to TX FIFO. Keep count of RX and TX errors.
 	 */
@@ -171,19 +208,28 @@ void *pusa_audio_thread(void *arg)
 	    pusa_tx_errors++;
 	if (status & PCM_CS_RXR)
 	{
-	    int data[2];
+	    if (ndata < 15)
+	    {
+		data[ndata++] = readl(PCM_FIFO_A);
+		data[ndata++] = readl(PCM_FIFO_A);
+		pusa_rx_counter++;
+	    }
+	    else
+		pusa_stall_errors++;
 
-	    data[0] = readl(PCM_FIFO_A);
-	    data[1] = readl(PCM_FIFO_A);
+	    if (!pusa_stall_granted)
+	    {
+		for (int i = 0; i < ndata; i += 2)
+		{
+		    if (pusa_audio_handler != NULL)
+			pusa_audio_handler(data + i, 2);
 
-	    if (pusa_audio_handler != NULL)
-		pusa_audio_handler(data, 2);
-
-	    writel(PCM_FIFO_A, data[0]);
-	    writel(PCM_FIFO_A, data[1]);
-
-	    pusa_tx_counter++;
-	    pusa_rx_counter++;
+		    writel(PCM_FIFO_A, data[i]);
+		    writel(PCM_FIFO_A, data[i + 1]);
+		    pusa_tx_counter++;
+		}
+		ndata = 0;
+	    }
 	}
     }
 }
@@ -228,8 +274,8 @@ int pusa_init(const char *codec_name, pusa_audio_handler_t func)
      * Set priority of the main thread to something reasonable.
      */
     struct sched_param sparam;
-    sparam.sched_priority = -20;
-    sched_setscheduler(getpid(), SCHED_FIFO, &sparam);
+    sparam.sched_priority = 0;
+    sched_setscheduler(gettid(), SCHED_FIFO, &sparam);
 
     /*
      * Prepare the hardware library code for use.  Mostly needs

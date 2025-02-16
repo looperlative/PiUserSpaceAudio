@@ -28,64 +28,209 @@
 
 pid_t gettid(void);
 
+static pthread_mutex_t pusamidi_fifo_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char pusamidi_in_fifo[0x10000];
+static int pusamidi_in_fifo_in = 0;
+static int pusamidi_in_fifo_out = 0;
+
 #define PUSAMIDI_PORT_MAX	32
 
-static snd_rawmidi_t *pusamidi_outs[PUSAMIDI_PORT_MAX];
-static int pusamidi_out_num = 0;
-
-void *pusamidi_in_thread(void *arg)
+struct pusamidi_port_s
 {
+    char *hwname;
+    char *name;
+    pid_t tid;
     snd_rawmidi_t *midiport;
-    char *hwname = arg;
+};
 
-    if (snd_rawmidi_open(&midiport, NULL, hwname, 0) >= 0)
+static pthread_mutex_t pusamidi_db_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct pusamidi_port_s pusamidi_ins[PUSAMIDI_PORT_MAX];
+static struct pusamidi_port_s pusamidi_outs[PUSAMIDI_PORT_MAX];
+
+static struct pusamidi_port_s *pusamidi_find_port(char *hwname, snd_rawmidi_stream_t type)
+{
+    struct pusamidi_port_s *ports = NULL;
+
+    if (type == SND_RAWMIDI_STREAM_INPUT)
+	ports = pusamidi_ins;
+    else if (type == SND_RAWMIDI_STREAM_OUTPUT)
+	ports = pusamidi_outs;
+    else
+	return NULL;
+
+    pthread_mutex_lock(&pusamidi_db_lock);
+    for (int i = 0; i < PUSAMIDI_PORT_MAX; i++)
     {
-	printf(" In: tid: %d, name %s\n", gettid(), hwname);
+	if (hwname == NULL)
+	{
+	    if (ports[i].hwname == NULL)
+	    {
+		pthread_mutex_unlock(&pusamidi_db_lock);
+		return ports + i;
+	    }
+	}
+	else if (ports[i].hwname != NULL && strcmp(hwname, ports[i].hwname) == 0)
+	{
+	    pthread_mutex_unlock(&pusamidi_db_lock);
+	    return ports + i;
+	}
     }
 
-    char buffer[10];
+    pthread_mutex_unlock(&pusamidi_db_lock);
+    return NULL;
+}
+
+static void pusamidi_close_port(char *hwname, snd_rawmidi_stream_t type)
+{
+    struct pusamidi_port_s *port = pusamidi_find_port(hwname, type);
+    if (port)
+    {
+	pthread_mutex_lock(&pusamidi_db_lock);
+	if (port->midiport)
+	    snd_rawmidi_close(port->midiport);
+
+	free(port->name);
+	free(port->hwname);
+
+	port->midiport = NULL;
+	port->tid = 0;
+	port->name = NULL;
+	port->hwname = NULL;
+	pthread_mutex_unlock(&pusamidi_db_lock);
+    }
+}
+
+static int pusamidi_process_midi_in(unsigned char *buffer, int *len, unsigned char *last_cmd)
+{
+    if (buffer[*len-1] & 0x80)
+    {
+	buffer[0] = buffer[*len-1];
+	*len = 1;
+    }
+
+    if (buffer[0] > 0xf4 && buffer[0] < 0xff)
+	return 1;
+
+    if ((buffer[0] == 0xf1 || buffer[0] == 0xf3) && *len == 2)
+	return *len;
+
+    if (buffer[0] == 0xf2 && *len == 3)
+	return *len;
+
+    if (buffer[0] == 0xf0 && buffer[*len-1] == 0xf7)
+	return *len;
+
+    if ((buffer[0] & 0x80) == 0)
+    {
+	buffer[1] = buffer[0];
+	buffer[0] = *last_cmd;
+	*len = 2;
+    }
+
+    if ((buffer[0] == 0x80 || buffer[0] == 0x90 || buffer[0] == 0xa0 ||
+	 buffer[0] == 0xb0 || buffer[0] == 0xe0) && *len == 3)
+    {
+	*last_cmd = buffer[0];
+	return *len;
+    }
+    else if ((buffer[0] == 0xc0 || buffer[0] == 0xd0) && *len == 2)
+    {
+	*last_cmd = buffer[0];
+	return *len;
+    }
+
+    return 0;
+}
+
+static void *pusamidi_in_thread(void *arg)
+{
+    unsigned char buffer[2048];
+    unsigned char last_cmd = 0;
+    int len = 0;
+
+    struct pusamidi_port_s *port = arg;
+
+    if (snd_rawmidi_open(&port->midiport, NULL, port->hwname, 0) < 0)
+	goto done;
+
+    printf(" In: tid: %d, name %s (%s)\n", gettid(), port->hwname, port->name);
+
+    unsigned char c;
     while (1)
     {
-	int status = snd_rawmidi_read(midiport, buffer, sizeof(buffer));
+	int status = snd_rawmidi_read(port->midiport, &c, sizeof(c));
 	if (status < 0 && status != -EBUSY && status != -EAGAIN)
 	{
-	    printf("%s: %s\n", hwname, snd_strerror(status));
-	    return NULL;
+	    printf("%s: %s\n", port->hwname, snd_strerror(status));
+	    goto done;
 	}
 	else if (status > 0)
 	{
-	    for (int j = 0; j < status; j++)
-		printf("%02x ", buffer[j]);
-	    printf("\n");
+	    if (len < sizeof(buffer))
+		buffer[len++] = c;
+	    else
+	    {
+		len = 1;
+		buffer[0] = c;
+		last_cmd = 0;
+	    }
+
+	    int n = pusamidi_process_midi_in(buffer, &len, &last_cmd);
+	    if (n > 0)
+	    {
+		pthread_mutex_lock(&pusamidi_fifo_lock);
+		int room = pusamidi_in_fifo_out - pusamidi_in_fifo_in;
+		if (room <= 0)
+		    room += sizeof(pusamidi_in_fifo);
+		room -= 1;
+
+		if (room < n)
+		    printf("MIDI in FIFO full\n");
+		else
+		{
+		    for (int i = 0; i < n; i++)
+		    {
+			pusamidi_in_fifo[pusamidi_in_fifo_in++] = buffer[i];
+			if (pusamidi_in_fifo_in >= sizeof(pusamidi_in_fifo))
+			    pusamidi_in_fifo_in = 0;
+		    }
+		}
+
+		pthread_mutex_unlock(&pusamidi_fifo_lock);
+		len = 0;
+	    }
 	}
     }
+
+done:
+    pusamidi_close_port(port->hwname, SND_RAWMIDI_STREAM_OUTPUT);
+    pusamidi_close_port(port->hwname, SND_RAWMIDI_STREAM_INPUT);
 
     return NULL;
 }
 
-void pusamidi_thread_create(const char *hwname)
+static void pusamidi_thread_create(struct pusamidi_port_s *port)
 {
     pthread_t tid;
     pthread_attr_t attr;
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&tid, &attr, pusamidi_in_thread, strdup(hwname));
+    pthread_create(&tid, &attr, pusamidi_in_thread, port);
     pthread_attr_destroy(&attr);
 }
 
-void pusamidi_output_create(const char *hwname)
+static void pusamidi_output_create(struct pusamidi_port_s *port)
 {
-    if (pusamidi_out_num < PUSAMIDI_PORT_MAX &&
-	snd_rawmidi_open(NULL, &pusamidi_outs[pusamidi_out_num], hwname, SND_RAWMIDI_SYNC) >= 0)
+    if (snd_rawmidi_open(NULL, &port->midiport, port->hwname, SND_RAWMIDI_SYNC) >= 0)
     {
-	printf("Out: %s\n", hwname);
-	pusamidi_out_num++;
+	printf("Out: %s (%s)\n", port->hwname, port->name);
     }
 }
 
-void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum,
-				   snd_rawmidi_stream_t type, void (*func)(const char *s))
+static void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum,
+				   snd_rawmidi_stream_t type,
+				   void (*func)(struct pusamidi_port_s *))
 {
     snd_rawmidi_info_t *info;
     snd_rawmidi_info_alloca(&info);
@@ -103,11 +248,29 @@ void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devicenum,
 
 	char hwname[100];
 	sprintf(hwname, "hw:%d,%d,%d", cardnum, devicenum, i);
-	func(hwname);
+
+	struct pusamidi_port_s *port = pusamidi_find_port(hwname, type);
+	if (port == NULL)
+	{
+	    port = pusamidi_find_port(NULL, type);
+	    if (port == NULL)
+	    {
+		printf("Can't register device %s (%s).\n", hwname, name);
+		return;
+	    }
+
+	    port->hwname = strdup(hwname);
+	    port->name = strdup(name);
+	    port->tid = 0;
+	    port->midiport = NULL;
+
+	    func(port);
+	}
     }
 }
 
-void pusamidi_enumerate_devices(snd_rawmidi_stream_t type, void (*func)(const char *s))
+static void pusamidi_enumerate_devices(snd_rawmidi_stream_t type,
+				void (*func)(struct pusamidi_port_s *s))
 {
     int cardnum = -1;
     snd_ctl_t *ctld;
@@ -146,14 +309,62 @@ void pusamidi_enumerate_devices(snd_rawmidi_stream_t type, void (*func)(const ch
     }
 }
 
+static void *pusamidi_enumeration_thread(void *arg)
+{
+    while (1)
+    {
+	pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_INPUT, pusamidi_thread_create);
+	pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_OUTPUT, pusamidi_output_create);
+
+	sleep(1);
+    }
+}
+
+void pusamidi_init(void)
+{
+    pthread_t tid;
+    pthread_attr_t attr;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, pusamidi_enumeration_thread, NULL);
+    pthread_attr_destroy(&attr);
+}
+
+int pusamidi_get_midi_in(void)
+{
+    int c = -1;
+
+    pthread_mutex_lock(&pusamidi_fifo_lock);
+    if (pusamidi_in_fifo_out != pusamidi_in_fifo_in)
+    {
+	c = pusamidi_in_fifo[pusamidi_in_fifo_out++];
+	if (pusamidi_in_fifo_out >= sizeof(pusamidi_in_fifo))
+	    pusamidi_in_fifo_out = 0;
+    }
+
+    pthread_mutex_unlock(&pusamidi_fifo_lock);
+
+    return c;
+}
+
 #ifdef PUSAMIDI_UNIT_TEST
 int main(int argc, char **argv)
 {
-    pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_INPUT, pusamidi_thread_create);
-    pusamidi_enumerate_devices(SND_RAWMIDI_STREAM_OUTPUT, pusamidi_output_create);
+    pusamidi_init();
 
     while (1)
     {
+	int c = pusamidi_get_midi_in();
+
+	if (c >= 0)
+	{
+	    if ((c & 0x80))
+		printf("\n");
+
+	    printf("%02x ", c);
+	    fflush(stdout);
+	}
     }
 
     return 0;
