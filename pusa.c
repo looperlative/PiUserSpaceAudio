@@ -99,6 +99,15 @@ void *pusa_audio_thread(void *arg)
     /*
      * It is possible that we were running before and never stopped.  There is
      * no reset bit, but we can stop the interface, wait, and then enable it again.
+     *
+     * This does seem to steal the I2S interface from Linux.  This is tested with
+     * the Pisound card.  Stealing the interface without disabling the driver allows
+     * the Pisound MIDI interface to continue to work in Linux ALSA.  This may not
+     * strictly the cleanest way to do things, but it works and avoids rewriting
+     * the device driver for the Pisound MIDI interface which is currently a single
+     * driver with the audio interface.  Honestly, it doesn't need to be that way
+     * since the Pisound is using a UART with a SPI interface for MIDI.  Like it or
+     * not, I've decided to leave things this way.
      */
     writel(PCM_CS_A, 0);
     usleep(10000);
