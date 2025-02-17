@@ -57,6 +57,8 @@ int pusa_tx_counter = 0;
 int pusa_tx_counter_at_first_found = 0;
 int pusa_prefill_count = 0;
 int pusa_done = 0;
+static int pusa_rt_tid = 0;
+
 pusa_audio_handler_t pusa_audio_handler = NULL;
 
 static pthread_mutex_t pusa_stall_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -70,7 +72,18 @@ static volatile int pusa_stall_granted = 0;
  */
 void pusa_stall_rt(void)
 {
+    // Don't let the RT thread try to stall itself.
+    if (gettid() == pusa_rt_tid)
+	return;
+
+    // Only allow one thread stall the RT at a time.
     pthread_mutex_lock(&pusa_stall_lock);
+
+    // Don't ask for stall if it is already granted.
+    while (pusa_stall_granted)
+	;
+
+    // Ask for stall and wait for it to be granted.
     pusa_want_stall = 1;
     while (!pusa_stall_granted)
 	;
@@ -81,12 +94,18 @@ void pusa_stall_rt(void)
  */
 void pusa_unstall_rt(void)
 {
+    if (gettid() == pusa_rt_tid)
+	return;
+
     pusa_stall_granted = 0;
+
     pthread_mutex_unlock(&pusa_stall_lock);
 }
 
 void *pusa_audio_thread(void *arg)
 {
+    pusa_rt_tid = gettid();
+
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     CPU_SET(3, &cpus);
@@ -94,7 +113,7 @@ void *pusa_audio_thread(void *arg)
 
     struct sched_param sparam;
     sparam.sched_priority = 99;
-    sched_setscheduler(gettid(), SCHED_FIFO, &sparam);
+    sched_setscheduler(pusa_rt_tid, SCHED_FIFO, &sparam);
 
     /*
      * It is possible that we were running before and never stopped.  There is
@@ -230,6 +249,8 @@ void *pusa_audio_thread(void *arg)
 	    {
 		for (int i = 0; i < ndata; i += 2)
 		{
+		    pusa_stall_rt();
+
 		    if (pusa_audio_handler != NULL)
 			pusa_audio_handler(data + i, 2);
 
