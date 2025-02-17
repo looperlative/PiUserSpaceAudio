@@ -58,6 +58,7 @@ int pusa_tx_counter_at_first_found = 0;
 int pusa_prefill_count = 0;
 int pusa_done = 0;
 static int pusa_rt_tid = 0;
+static __thread int pusa_is_rt_thread = 0;
 
 pusa_audio_handler_t pusa_audio_handler = NULL;
 
@@ -73,7 +74,7 @@ static volatile int pusa_stall_granted = 0;
 void pusa_stall_rt(void)
 {
     // Don't let the RT thread try to stall itself.
-    if (gettid() == pusa_rt_tid)
+    if (pusa_is_rt_thread)
 	return;
 
     // Only allow one thread stall the RT at a time.
@@ -94,7 +95,7 @@ void pusa_stall_rt(void)
  */
 void pusa_unstall_rt(void)
 {
-    if (gettid() == pusa_rt_tid)
+    if (pusa_is_rt_thread)
 	return;
 
     pusa_stall_granted = 0;
@@ -105,6 +106,7 @@ void pusa_unstall_rt(void)
 void *pusa_audio_thread(void *arg)
 {
     pusa_rt_tid = gettid();
+    pusa_is_rt_thread = 1;
 
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
@@ -327,6 +329,7 @@ int pusa_init(const char *codec_name, pusa_audio_handler_t func)
     pthread_t rt_tid;
 
     pthread_create(&rt_tid, NULL, pusa_audio_thread, NULL);
+
     return 0;
 }
 
