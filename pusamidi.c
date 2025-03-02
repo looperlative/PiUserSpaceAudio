@@ -231,7 +231,7 @@ static void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devi
 				   void (*func)(struct pusamidi_port_s *))
 {
     snd_rawmidi_info_t *info;
-    snd_rawmidi_info_alloca(&info);
+    snd_rawmidi_info_malloc(&info);
 
     snd_rawmidi_info_set_stream(info, type);
     snd_rawmidi_info_set_device(info, devicenum);
@@ -254,6 +254,7 @@ static void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devi
 	    if (port == NULL)
 	    {
 		printf("Can't register device %s (%s).\n", hwname, name);
+		snd_rawmidi_info_free(info);
 		return;
 	    }
 
@@ -265,6 +266,8 @@ static void pusamidi_enumerate_subdevices(snd_ctl_t *ctld, int cardnum, int devi
 	    func(port);
 	}
     }
+
+    snd_rawmidi_info_free(info);
 }
 
 static void pusamidi_enumerate_devices(snd_rawmidi_stream_t type,

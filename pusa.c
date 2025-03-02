@@ -51,7 +51,6 @@ struct pusa_codec_s
 
 int pusa_rx_errors = 0;
 int pusa_tx_errors = 0;
-int pusa_stall_errors = 0;
 int pusa_rx_counter = 0;
 int pusa_tx_counter = 0;
 int pusa_tx_counter_at_first_found = 0;
@@ -62,45 +61,32 @@ static __thread int pusa_is_rt_thread = 0;
 
 pusa_audio_handler_t pusa_audio_handler = NULL;
 
-static pthread_mutex_t pusa_stall_lock = PTHREAD_MUTEX_INITIALIZER;
-static volatile int pusa_want_stall = 0;
-static volatile int pusa_stall_granted = 0;
+static pusa_rt_func pusa_rt_modifier_func;
+static int pusa_rt_modifier_return;
+static void *pusa_rt_modifier_parm;
+volatile int pusa_rt_modifier_go = 0;
+static pthread_mutex_t pusa_rt_modifier_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/*
- * This is used to temporarily stall audio processing to avoid
- * race conditions.  Care needs to be taken because stalling
- * must be shorter than 8 sample times.
- */
-void pusa_stall_rt(void)
-{
-    // Don't let the RT thread try to stall itself.
-    if (pusa_is_rt_thread)
-	return;
-
-    // Only allow one thread stall the RT at a time.
-    pthread_mutex_lock(&pusa_stall_lock);
-
-    // Don't ask for stall if it is already granted.
-    while (pusa_stall_granted)
-	;
-
-    // Ask for stall and wait for it to be granted.
-    pusa_want_stall = 1;
-    while (!pusa_stall_granted)
-	;
-}
-
-/*
- * Resume audio processing in the RT thread.
- */
-void pusa_unstall_rt(void)
+int pusa_execute_in_rt(pusa_rt_func func, void *parm)
 {
     if (pusa_is_rt_thread)
-	return;
+    {
+	printf("execute_in_rt error\n");
+	exit(1);
+    }
 
-    pusa_stall_granted = 0;
+    pthread_mutex_lock(&pusa_rt_modifier_lock);
+    pusa_rt_modifier_parm = parm;
+    pusa_rt_modifier_func = func;
+    pusa_rt_modifier_go = 1;
 
-    pthread_mutex_unlock(&pusa_stall_lock);
+    while (pusa_rt_modifier_go)
+	;
+
+    int rv = pusa_rt_modifier_return;
+    pthread_mutex_unlock(&pusa_rt_modifier_lock);
+
+    return rv;
 }
 
 void *pusa_audio_thread(void *arg)
@@ -220,10 +206,10 @@ void *pusa_audio_thread(void *arg)
 
     while (!pusa_done)
     {
-	if (pusa_want_stall)
+	if (pusa_rt_modifier_go)
 	{
-	    pusa_want_stall = 0;
-	    pusa_stall_granted = 1;
+	    pusa_rt_modifier_return = (*pusa_rt_modifier_func)(pusa_rt_modifier_parm);
+	    pusa_rt_modifier_go = 0;
 	}
 
 	/*
@@ -244,24 +230,17 @@ void *pusa_audio_thread(void *arg)
 		data[ndata++] = readl(PCM_FIFO_A);
 		pusa_rx_counter++;
 	    }
-	    else
-		pusa_stall_errors++;
 
-	    if (!pusa_stall_granted)
+	    for (int i = 0; i < ndata; i += 2)
 	    {
-		for (int i = 0; i < ndata; i += 2)
-		{
-		    pusa_stall_rt();
+		if (pusa_audio_handler != NULL)
+		    pusa_audio_handler(data + i, 2);
 
-		    if (pusa_audio_handler != NULL)
-			pusa_audio_handler(data + i, 2);
-
-		    writel(PCM_FIFO_A, data[i]);
-		    writel(PCM_FIFO_A, data[i + 1]);
-		    pusa_tx_counter++;
-		}
-		ndata = 0;
+		writel(PCM_FIFO_A, data[i]);
+		writel(PCM_FIFO_A, data[i + 1]);
+		pusa_tx_counter++;
 	    }
+	    ndata = 0;
 	}
     }
 }
@@ -327,7 +306,6 @@ int pusa_init(const char *codec_name, pusa_audio_handler_t func)
      * Start audio thread.
      */
     pthread_t rt_tid;
-
     pthread_create(&rt_tid, NULL, pusa_audio_thread, NULL);
 
     return 0;
@@ -338,4 +316,5 @@ void pusa_print_stats(void)
     printf("tx %d (%d), rx %d, tx errors %d, rx errors %d, prefill %d\n",
 	   pusa_tx_counter, pusa_tx_counter_at_first_found, pusa_rx_counter,
 	   pusa_tx_errors, pusa_rx_errors, pusa_prefill_count);
+
 }
