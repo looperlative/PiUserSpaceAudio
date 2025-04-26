@@ -313,11 +313,26 @@ int pusa_init(const char *codec_name, pusa_audio_handler_t func)
     fclose(fp);
 
     /*
-     * Set priority of the main thread to something reasonable.
+     * Lock memory to prevent paging.
      */
-    struct sched_param sparam;
-    sparam.sched_priority = 0;
-    sched_setscheduler(gettid(), SCHED_FIFO, &sparam);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+        perror("mlockall failed");
+        return EXIT_FAILURE;
+    }
+
+    /*
+     * Set affinity of standard threads.
+     */
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(0, &cpuset);
+    CPU_SET(1, &cpuset);
+    CPU_SET(2, &cpuset);
+
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("Failed to set main thread affinity");
+        return EXIT_FAILURE;
+    }
 
     /*
      * Prepare the hardware library code for use.  Mostly needs
@@ -353,9 +368,11 @@ void pusa_print_stats(void)
     for (int i = 0; i < long_count; i++)
 	printf("   %p\n", long_funcs[i]);
 
+#ifdef PUSA_VERBOSE_DEBUG
     printf("Times:\n");
     for (int i = 0; i < num_times; i++)
 	printf("   %d %d\n", time1_times[i], time2_times[i]);
+#endif
 
     num_times = 0;
 }
