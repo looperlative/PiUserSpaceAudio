@@ -48,6 +48,7 @@ void *base_address = 0;
 void *clks_base;
 void *gpio_base;
 void *pcm_base;
+void *systemtimer_base;
 
 static int bcmhw_get_hw_type(void)
 {
@@ -157,6 +158,15 @@ int bcmhw_init(void)
 	return -1;
     }
 
+    systemtimer_base = mmap(NULL, 4096, PROT_READ,
+			    MAP_SHARED, mem_fd, BCMHW_ADDR(0x3000));
+    if (systemtimer_base == MAP_FAILED)
+    {
+	perror("system timer mmap failed");
+	close(mem_fd);
+	return -1;
+    }
+
     close(mem_fd);
 
 #if 0
@@ -196,4 +206,9 @@ int bcmhw_set_i2s_clk(int samplerate)
     printf(" after: %08x (%d): %08x %08x\n", addr, CM_I2S_CLOCK, readl(addr), readl(addr + 4));
 
     return 0;
+}
+
+unsigned long bcmhw_get_system_timer(void)
+{
+    return readl((unsigned long) systemtimer_base + 0x4);
 }

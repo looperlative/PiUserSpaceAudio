@@ -51,6 +51,7 @@ struct pusa_codec_s
 
 int pusa_rx_errors = 0;
 int pusa_tx_errors = 0;
+int pusa_max_loops = 0;
 int pusa_rx_counter = 0;
 int pusa_tx_counter = 0;
 int pusa_tx_counter_at_first_found = 0;
@@ -67,11 +68,18 @@ static void *pusa_rt_modifier_parm;
 volatile int pusa_rt_modifier_go = 0;
 static pthread_mutex_t pusa_rt_modifier_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static pusa_rt_func long_funcs[5000] = { 0 };
+static int long_count = 0;
+
+static unsigned long time1_times[100];
+static unsigned long time2_times[100];
+volatile unsigned long num_times = 0;
+
 int pusa_execute_in_rt(pusa_rt_func func, void *parm)
 {
     if (pusa_is_rt_thread)
     {
-	printf("execute_in_rt error\n");
+	printf("execute_in_rt error: %p, %p\n", func, parm);
 	exit(1);
     }
 
@@ -96,7 +104,7 @@ void *pusa_audio_thread(void *arg)
 
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
-    CPU_SET(3, &cpus);
+    CPU_SET(2, &cpus);
     sched_setaffinity(0, sizeof(cpus), &cpus);
 
     struct sched_param sparam;
@@ -206,41 +214,64 @@ void *pusa_audio_thread(void *arg)
 
     while (!pusa_done)
     {
+	pusa_rt_func last_func;
 	if (pusa_rt_modifier_go)
 	{
 	    pusa_rt_modifier_return = (*pusa_rt_modifier_func)(pusa_rt_modifier_parm);
+	    last_func = pusa_rt_modifier_func;
 	    pusa_rt_modifier_go = 0;
 	}
 
 	/*
 	 * Read FIFO if data available and the send to TX FIFO. Keep count of RX and TX errors.
 	 */
-	unsigned long status = readl(PCM_CS_A);
-	writel(PCM_CS_A, status);
+	unsigned long status;
+	int nloops = 0;
 
-	if (status & PCM_CS_RXERR)
-	    pusa_rx_errors++;
-	if (status & PCM_CS_TXERR)
-	    pusa_tx_errors++;
-	if (status & PCM_CS_RXR)
+	do
 	{
-	    if (ndata < 15)
+	    status = readl(PCM_CS_A);
+	    writel(PCM_CS_A, status);
+
+	    if (status & PCM_CS_RXERR)
+		pusa_rx_errors++;
+	    if (status & PCM_CS_TXERR)
+		pusa_tx_errors++;
+	    if (status & PCM_CS_RXR)
 	    {
 		data[ndata++] = readl(PCM_FIFO_A);
 		data[ndata++] = readl(PCM_FIFO_A);
 		pusa_rx_counter++;
+		nloops++;
 	    }
 
 	    for (int i = 0; i < ndata; i += 2)
 	    {
+		if (num_times < 100)
+		    time1_times[num_times] = bcmhw_get_system_timer();
+
 		if (pusa_audio_handler != NULL)
 		    pusa_audio_handler(data + i, 2);
+
+		if (num_times < 100)
+		    time2_times[num_times++] = bcmhw_get_system_timer();
 
 		writel(PCM_FIFO_A, data[i]);
 		writel(PCM_FIFO_A, data[i + 1]);
 		pusa_tx_counter++;
 	    }
 	    ndata = 0;
+	}
+	while (status & PCM_CS_RXR);
+
+	if (nloops > 1 && long_count < 5000)
+	{
+	    long_funcs[long_count++] = last_func;
+	}
+
+	if (nloops > pusa_max_loops)
+	{
+	    pusa_max_loops = nloops;
 	}
     }
 }
@@ -313,8 +344,18 @@ int pusa_init(const char *codec_name, pusa_audio_handler_t func)
 
 void pusa_print_stats(void)
 {
-    printf("tx %d (%d), rx %d, tx errors %d, rx errors %d, prefill %d\n",
+    printf("tx %d (%d), rx %d, tx errors %d, rx errors %d, prefill %d, max loops %d\n",
 	   pusa_tx_counter, pusa_tx_counter_at_first_found, pusa_rx_counter,
-	   pusa_tx_errors, pusa_rx_errors, pusa_prefill_count);
+	   pusa_tx_errors, pusa_rx_errors, pusa_prefill_count, pusa_max_loops);
+    pusa_max_loops = 0;
 
+    printf("Long functions:\n");
+    for (int i = 0; i < long_count; i++)
+	printf("   %p\n", long_funcs[i]);
+
+    printf("Times:\n");
+    for (int i = 0; i < num_times; i++)
+	printf("   %d %d\n", time1_times[i], time2_times[i]);
+
+    num_times = 0;
 }

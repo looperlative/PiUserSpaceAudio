@@ -220,7 +220,7 @@ static void pusamidi_thread_create(struct pusamidi_port_s *port)
 
 static void pusamidi_output_create(struct pusamidi_port_s *port)
 {
-    if (snd_rawmidi_open(NULL, &port->midiport, port->hwname, SND_RAWMIDI_SYNC) >= 0)
+    if (snd_rawmidi_open(NULL, &port->midiport, port->hwname, 0 /*SND_RAWMIDI_SYNC*/) >= 0)
     {
 	printf("Out: %s (%s)\n", port->hwname, port->name);
     }

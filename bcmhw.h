@@ -145,5 +145,6 @@ void bcmhw_gpio_select(int gpio, int function);
 void bcmhw_gpio_print(int gpio);
 int bcmhw_set_i2s_clk(int samplerate);
 void bcmhw_gpio_set(int gpio, int on);
+unsigned long bcmhw_get_system_timer(void);
 
 #endif /* __bcmhw_h__ */
