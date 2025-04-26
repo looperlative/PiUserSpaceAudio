@@ -104,7 +104,7 @@ void *pusa_audio_thread(void *arg)
 
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
-    CPU_SET(2, &cpus);
+    CPU_SET(3, &cpus);
     sched_setaffinity(0, sizeof(cpus), &cpus);
 
     struct sched_param sparam;
