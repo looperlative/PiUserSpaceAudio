@@ -1,3 +1,13 @@
+WARNING: I highly recommend disabling the Pisound Linux driver when
+you use an application based on this.  To do so, I currently create
+a file /etc/modprobe.d/raspi-blacklist.conf containing these two
+lines:
+
+blacklist snd_soc_pisound
+blacklist snd_soc_bcm2835_i2s
+
+--------------------------------------------------------------------
+
 The purpose of this project is to create a user space framework for
 real-time audio processing.  While Linux kernel audio drivers are
 standard and overall very good.  They are subject to latency
