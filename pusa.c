@@ -38,6 +38,17 @@
 
 pid_t gettid(void);
 
+// Memory page size
+#define PAGE_SIZE 4096
+
+// DMA buffer size in samples (must be a multiple of 2 for stereo I2S)
+#define DMA_BUFFER_SIZE 512
+#define NUM_DMA_BUFFERS 2
+
+// DMA channel numbers for RX and TX
+#define DMA_RX_CHANNEL 1
+#define DMA_TX_CHANNEL 2
+
 struct pusa_codec_s
 {
     char *name;
@@ -60,6 +71,19 @@ int pusa_done = 0;
 static int pusa_rt_tid = 0;
 static __thread int pusa_is_rt_thread = 0;
 
+// DMA buffers and control blocks
+static int *rx_buffer_virt[NUM_DMA_BUFFERS];  // Virtual address of RX buffers
+static int *tx_buffer_virt[NUM_DMA_BUFFERS];  // Virtual address of TX buffers
+static unsigned int rx_buffer_phys[NUM_DMA_BUFFERS];  // Physical address of RX buffers
+static unsigned int tx_buffer_phys[NUM_DMA_BUFFERS];  // Physical address of TX buffers
+static dma_cb_t *rx_cb_virt[NUM_DMA_BUFFERS];  // Virtual address of RX control blocks
+static dma_cb_t *tx_cb_virt[NUM_DMA_BUFFERS];  // Virtual address of TX control blocks
+static unsigned int rx_cb_phys[NUM_DMA_BUFFERS];  // Physical address of RX control blocks
+static unsigned int tx_cb_phys[NUM_DMA_BUFFERS];  // Physical address of TX control blocks
+
+static int current_rx_buffer = 0;  // Index of current RX buffer
+static int current_tx_buffer = 0;  // Index of current TX buffer
+
 pusa_audio_handler_t pusa_audio_handler = NULL;
 
 static pusa_rt_func pusa_rt_modifier_func;
@@ -74,6 +98,133 @@ static int long_count = 0;
 static unsigned long time1_times[100];
 static unsigned long time2_times[100];
 volatile unsigned long num_times = 0;
+
+// Function to allocate memory suitable for DMA (uncached and aligned)
+static void *dma_alloc(size_t size, unsigned int *phys_addr)
+{
+    int mem_fd;
+    void *virt_addr;
+    
+    // Open /dev/mem for physical memory access
+    mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (mem_fd < 0) {
+        perror("Failed to open /dev/mem");
+        return NULL;
+    }
+    
+    // Round up size to page boundary
+    size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    
+    // Allocate uncached memory
+    virt_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, 0);
+    if (virt_addr == MAP_FAILED) {
+        perror("mmap failed");
+        close(mem_fd);
+        return NULL;
+    }
+    
+    // Get physical address (simple approximation - real implementation requires more work)
+    // In practice, we would need a kernel driver to get the actual bus address
+    *phys_addr = (unsigned int)virt_addr;
+    
+    close(mem_fd);
+    return virt_addr;
+}
+
+// Function to initialize DMA for I2S audio
+static int init_dma(void)
+{
+    int i;
+    
+    // Allocate buffers and control blocks for RX and TX
+    for (i = 0; i < NUM_DMA_BUFFERS; i++) {
+        // Allocate RX buffer
+        rx_buffer_virt[i] = (int *)dma_alloc(DMA_BUFFER_SIZE * sizeof(int), &rx_buffer_phys[i]);
+        if (!rx_buffer_virt[i]) {
+            printf("Failed to allocate RX buffer %d\n", i);
+            return -1;
+        }
+        
+        // Allocate TX buffer
+        tx_buffer_virt[i] = (int *)dma_alloc(DMA_BUFFER_SIZE * sizeof(int), &tx_buffer_phys[i]);
+        if (!tx_buffer_virt[i]) {
+            printf("Failed to allocate TX buffer %d\n", i);
+            return -1;
+        }
+        
+        // Clear buffers
+        memset(rx_buffer_virt[i], 0, DMA_BUFFER_SIZE * sizeof(int));
+        memset(tx_buffer_virt[i], 0, DMA_BUFFER_SIZE * sizeof(int));
+        
+        // Allocate RX control block
+        rx_cb_virt[i] = (dma_cb_t *)dma_alloc(sizeof(dma_cb_t), &rx_cb_phys[i]);
+        if (!rx_cb_virt[i]) {
+            printf("Failed to allocate RX control block %d\n", i);
+            return -1;
+        }
+        
+        // Allocate TX control block
+        tx_cb_virt[i] = (dma_cb_t *)dma_alloc(sizeof(dma_cb_t), &tx_cb_phys[i]);
+        if (!tx_cb_virt[i]) {
+            printf("Failed to allocate TX control block %d\n", i);
+            return -1;
+        }
+        
+        // Configure RX control block
+        rx_cb_virt[i]->ti = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP |
+                           (DMA_DREQ_PCM_RX << DMA_TI_PERMAP_SHIFT) |
+                           DMA_TI_SRC_DREQ | DMA_TI_DEST_INC;
+        rx_cb_virt[i]->source_ad = (unsigned int)PCM_FIFO_A & 0x7FFFFFFF; // Physical address of PCM FIFO
+        rx_cb_virt[i]->dest_ad = rx_buffer_phys[i];
+        rx_cb_virt[i]->txfr_len = DMA_BUFFER_SIZE * sizeof(int);
+        rx_cb_virt[i]->stride = 0;
+        rx_cb_virt[i]->nextconbk = rx_cb_phys[(i + 1) % NUM_DMA_BUFFERS]; // Link to next control block
+        
+        // Configure TX control block
+        tx_cb_virt[i]->ti = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP |
+                           (DMA_DREQ_PCM_TX << DMA_TI_PERMAP_SHIFT) |
+                           DMA_TI_DEST_DREQ | DMA_TI_SRC_INC;
+        tx_cb_virt[i]->source_ad = tx_buffer_phys[i];
+        tx_cb_virt[i]->dest_ad = (unsigned int)PCM_FIFO_A & 0x7FFFFFFF; // Physical address of PCM FIFO
+        tx_cb_virt[i]->txfr_len = DMA_BUFFER_SIZE * sizeof(int);
+        tx_cb_virt[i]->stride = 0;
+        tx_cb_virt[i]->nextconbk = tx_cb_phys[(i + 1) % NUM_DMA_BUFFERS]; // Link to next control block
+    }
+    
+    return 0;
+}
+
+// Function to start DMA transfers
+static void start_dma(void)
+{
+    // Reset and configure DMA channels
+    
+    // Reset RX DMA channel
+    writel(DMA_CS(DMA_RX_CHANNEL), DMA_CS_RESET);
+    usleep(1000); // Wait for reset to complete
+    
+    // Reset TX DMA channel
+    writel(DMA_CS(DMA_TX_CHANNEL), DMA_CS_RESET);
+    usleep(1000); // Wait for reset to complete
+    
+    // Set RX DMA channel control block address
+    writel(DMA_CONBLK_AD(DMA_RX_CHANNEL), rx_cb_phys[0]);
+    
+    // Set TX DMA channel control block address
+    writel(DMA_CONBLK_AD(DMA_TX_CHANNEL), tx_cb_phys[0]);
+    
+    // Enable DMA for PCM
+    unsigned long cs = readl(PCM_CS_A);
+    writel(PCM_CS_A, cs | PCM_CS_DMAEN);
+    
+    // Start RX DMA channel
+    writel(DMA_CS(DMA_RX_CHANNEL), DMA_CS_ACTIVE | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | 
+          (8 << DMA_CS_PRIORITY_SHIFT) | (8 << DMA_CS_PANIC_PRIORITY_SHIFT) | DMA_CS_DREQ_STOPS_DMA);
+    
+    // Start TX DMA channel
+    writel(DMA_CS(DMA_TX_CHANNEL), DMA_CS_ACTIVE | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | 
+          (8 << DMA_CS_PRIORITY_SHIFT) | (8 << DMA_CS_PANIC_PRIORITY_SHIFT) | DMA_CS_DREQ_STOPS_DMA);
+}
 
 int pusa_execute_in_rt(pusa_rt_func func, void *parm)
 {
@@ -146,134 +297,140 @@ void *pusa_audio_thread(void *arg)
     bcmhw_gpio_select(20, GPIO_FUNC_ALT0);
     bcmhw_gpio_select(21, GPIO_FUNC_ALT0);
 
-    /* 32-bit data, 1-bit shift for I2S */
-    writel(PCM_RXC_A, (PCM_RXC_CH1WEX | PCM_RXC_CH1EN | PCM_RXC_CH1POS(1) | PCM_RXC_CH1WID(8) |
-		       PCM_RXC_CH2WEX | PCM_RXC_CH2EN | PCM_RXC_CH2POS(33) | PCM_RXC_CH2WID(8)));
-    writel(PCM_TXC_A, (PCM_TXC_CH1WEX | PCM_TXC_CH1EN | PCM_TXC_CH1POS(1) | PCM_TXC_CH1WID(8) |
-		       PCM_TXC_CH2WEX | PCM_TXC_CH2EN | PCM_TXC_CH2POS(33) | PCM_TXC_CH2WID(8)));
+    /*
+     * Clock setup is the most difficult parameter to understand.  The following works with
+     * the Pisound Audio/MIDI card for 48K sample rate.  The FLEN parameter must be an integral
+     * number in combination with the CLK_DIV parameter.  FLEN * CLK_DIV = CLK frequency / sample frequency.
+     *
+     * CLK frequency is 12MHz for Pisound.  12MHz / 48KHz = 250.  This gives CLK_DIV = 10 and FLEN = 25.
+     * The FS signal is high 1 CLK and low 24 CLK.
+     *
+     * Mode is I2S.  Each frame contains a left and right 32-bit sample.  The total size of a frame in
+     * bits is: FLEN * 2.  In this case: 25 * 2 = 50 CLK per frame.  One frame contains left and right
+     * channel 24-bit signed samples. The Pisound card is using 24-bit samples.
+     *
+     * The code below sets the PCM_RXC_A and PCM_TXC_A registers to enable left and right channel
+     * and sets width to 16 bits - our code will shift and sign extend to 32-bit signed int.
+     */
+    writel(PCM_MODE_A, PCM_MODE_FLEN(25) | PCM_MODE_FSLEN(1));
+    writel(PCM_RXC_A, PCM_RXC_CH1EN | PCM_RXC_CH1WID(16) | PCM_RXC_CH2EN | PCM_RXC_CH2WID(16));
+    writel(PCM_TXC_A, PCM_TXC_CH1EN | PCM_TXC_CH1WID(16) | PCM_TXC_CH2EN | PCM_TXC_CH2WID(16));
 
-    /* 64-bit total frame length, 32-bit frame sync length */
-    writel(PCM_MODE_A,
-	   PCM_MODE_CLK_DIS | PCM_MODE_FSI | PCM_MODE_CLKI |
-	   PCM_MODE_FLEN(63) | PCM_MODE_FSLEN(32));
-    writel(PCM_MODE_A,
-	   PCM_MODE_CLK_DIS | PCM_MODE_FSI | PCM_MODE_CLKI | PCM_MODE_FSM | PCM_MODE_CLKM |
-	   PCM_MODE_FLEN(63) | PCM_MODE_FSLEN(32));
-    writel(PCM_MODE_A,
-	   PCM_MODE_FSI | PCM_MODE_CLKI | PCM_MODE_FSM | PCM_MODE_CLKM |
-	   PCM_MODE_FLEN(63) | PCM_MODE_FSLEN(32));
-
-    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXTHR_LVL1 | PCM_CS_RXTHR_LVL1);
-
-    /* Clear FIFOs */
-    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXCLR | PCM_CS_RXCLR);
-    usleep(1000);
-
-    /* Enable rx and tx */
-    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_TXON | PCM_CS_RXON | PCM_CS_RXSEX);
-
-    /* Enable I2S */
-    writel(PCM_CS_A, readl(PCM_CS_A) | PCM_CS_EN | PCM_CS_RXSEX);
-
-    for (int i = 1; (readl(PCM_CS_A) & PCM_CS_TXW) != 0 && i <= 64; i++)
-    {
-	writel(PCM_FIFO_A, 0);
-	pusa_prefill_count = i;
+    /*
+     * Initialize and start DMA for I2S audio
+     */
+    if (init_dma() < 0) {
+        printf("Failed to initialize DMA\n");
+        return NULL;
     }
+    start_dma();
 
-    while (1)
-    {
-	/*
-	 * Wait for read FIFO to have data.  Meanwhile, make certain that
-	 * write FIFO is kept full.
-	 */
-	unsigned long status = readl(PCM_CS_A);
-	writel(PCM_CS_A, status);
+    /*
+     * Check if TX_EMPTY is set and if not, clear it.
+     */
+    unsigned long status = readl(PCM_CS_A);
+    if ((status & PCM_CS_TXE) == 0)
+	writel(PCM_CS_A, status | PCM_CS_TXCLR);
+    status = readl(PCM_CS_A);
 
-	if (status & PCM_CS_RXERR)
-	    pusa_rx_errors++;
-	if (status & PCM_CS_TXERR)
-	    pusa_tx_errors++;
-	if (status & PCM_CS_RXR)
-	{
-	    break;
-	}
-	else if ((status & PCM_CS_TXW) != 0)
-	{
-	    writel(PCM_FIFO_A, 0);
-	    writel(PCM_FIFO_A, 0);
-	    pusa_tx_counter++;
-	}
-    }
-
-    pusa_tx_counter_at_first_found = pusa_tx_counter;
-    pusa_tx_counter = 0;
-
-    int data[16];
-    int ndata = 0;
+    /*
+     * Enable RX and TX simultaneously
+     */
+    writel(PCM_CS_A, status | PCM_CS_RXON | PCM_CS_TXON);
 
     while (!pusa_done)
     {
-	pusa_rt_func last_func;
-	if (pusa_rt_modifier_go)
-	{
-	    pusa_rt_modifier_return = (*pusa_rt_modifier_func)(pusa_rt_modifier_parm);
-	    last_func = pusa_rt_modifier_func;
-	    pusa_rt_modifier_go = 0;
-	}
+        pusa_rt_func last_func;
+        if (pusa_rt_modifier_go)
+        {
+            pusa_rt_modifier_return = (*pusa_rt_modifier_func)(pusa_rt_modifier_parm);
+            last_func = pusa_rt_modifier_func;
+            pusa_rt_modifier_go = 0;
+        }
 
-	/*
-	 * Read FIFO if data available and the send to TX FIFO. Keep count of RX and TX errors.
-	 */
-	unsigned long status;
-	int nloops = 0;
+        /*
+         * Process audio data using DMA
+         */
+        
+        // Check if RX DMA has completed a buffer
+        if (readl(DMA_CS(DMA_RX_CHANNEL)) & DMA_CS_END) {
+            // Process received audio data
+            int buffer_processed = 0;
+            
+            for (int i = 0; i < DMA_BUFFER_SIZE; i += 2) {
+                if (num_times < 100)
+                    time1_times[num_times] = bcmhw_get_system_timer();
 
-	do
-	{
-	    status = readl(PCM_CS_A);
-	    writel(PCM_CS_A, status);
+                if (pusa_audio_handler != NULL) {
+                    // Process audio data through the handler function
+                    pusa_audio_handler(&rx_buffer_virt[current_rx_buffer][i], 2);
+                    
+                    // Copy processed data to TX buffer
+                    tx_buffer_virt[current_tx_buffer][i] = rx_buffer_virt[current_rx_buffer][i];
+                    tx_buffer_virt[current_tx_buffer][i+1] = rx_buffer_virt[current_rx_buffer][i+1];
+                }
 
-	    if (status & PCM_CS_RXERR)
-		pusa_rx_errors++;
-	    if (status & PCM_CS_TXERR)
-		pusa_tx_errors++;
-	    if (status & PCM_CS_RXR)
-	    {
-		data[ndata++] = readl(PCM_FIFO_A);
-		data[ndata++] = readl(PCM_FIFO_A);
-		pusa_rx_counter++;
-		nloops++;
-	    }
-
-	    for (int i = 0; i < ndata; i += 2)
-	    {
-		if (num_times < 100)
-		    time1_times[num_times] = bcmhw_get_system_timer();
-
-		if (pusa_audio_handler != NULL)
-		    pusa_audio_handler(data + i, 2);
-
-		if (num_times < 100)
-		    time2_times[num_times++] = bcmhw_get_system_timer();
-
-		writel(PCM_FIFO_A, data[i]);
-		writel(PCM_FIFO_A, data[i + 1]);
-		pusa_tx_counter++;
-	    }
-	    ndata = 0;
-	}
-	while (status & PCM_CS_RXR);
-
-	if (nloops > 1 && long_count < 5000)
-	{
-	    long_funcs[long_count++] = last_func;
-	}
-
-	if (nloops > pusa_max_loops)
-	{
-	    pusa_max_loops = nloops;
-	}
+                if (num_times < 100)
+                    time2_times[num_times++] = bcmhw_get_system_timer();
+                
+                buffer_processed = 1;
+                pusa_rx_counter++;
+                pusa_tx_counter++;
+            }
+            
+            if (buffer_processed) {
+                // Switch to next buffer
+                current_rx_buffer = (current_rx_buffer + 1) % NUM_DMA_BUFFERS;
+                current_tx_buffer = (current_tx_buffer + 1) % NUM_DMA_BUFFERS;
+                
+                // Restart DMA if it's stopped
+                unsigned long rx_cs = readl(DMA_CS(DMA_RX_CHANNEL));
+                if (!(rx_cs & DMA_CS_ACTIVE)) {
+                    writel(DMA_CONBLK_AD(DMA_RX_CHANNEL), rx_cb_phys[current_rx_buffer]);
+                    writel(DMA_CS(DMA_RX_CHANNEL), DMA_CS_ACTIVE | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | 
+                          (8 << DMA_CS_PRIORITY_SHIFT) | (8 << DMA_CS_PANIC_PRIORITY_SHIFT) | DMA_CS_DREQ_STOPS_DMA);
+                }
+                
+                unsigned long tx_cs = readl(DMA_CS(DMA_TX_CHANNEL));
+                if (!(tx_cs & DMA_CS_ACTIVE)) {
+                    writel(DMA_CONBLK_AD(DMA_TX_CHANNEL), tx_cb_phys[current_tx_buffer]);
+                    writel(DMA_CS(DMA_TX_CHANNEL), DMA_CS_ACTIVE | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | 
+                          (8 << DMA_CS_PRIORITY_SHIFT) | (8 << DMA_CS_PANIC_PRIORITY_SHIFT) | DMA_CS_DREQ_STOPS_DMA);
+                }
+            }
+        }
+        
+        // Check for DMA errors
+        unsigned long rx_cs = readl(DMA_CS(DMA_RX_CHANNEL));
+        unsigned long tx_cs = readl(DMA_CS(DMA_TX_CHANNEL));
+        
+        if (rx_cs & DMA_CS_ERROR) {
+            pusa_rx_errors++;
+            writel(DMA_CS(DMA_RX_CHANNEL), DMA_CS_RESET);
+            usleep(1000);
+        }
+        
+        if (tx_cs & DMA_CS_ERROR) {
+            pusa_tx_errors++;
+            writel(DMA_CS(DMA_TX_CHANNEL), DMA_CS_RESET);
+            usleep(1000);
+        }
+        
+        // Check for PCM errors
+        status = readl(PCM_CS_A);
+        writel(PCM_CS_A, status);
+        
+        if (status & PCM_CS_RXERR)
+            pusa_rx_errors++;
+        if (status & PCM_CS_TXERR)
+            pusa_tx_errors++;
     }
+    
+    // Stop DMA when done
+    writel(DMA_CS(DMA_RX_CHANNEL), DMA_CS_RESET);
+    writel(DMA_CS(DMA_TX_CHANNEL), DMA_CS_RESET);
+    
+    return NULL;
 }
 
 struct pusa_codec_s *pusa_find_codec(const char *name)

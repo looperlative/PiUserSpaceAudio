@@ -125,10 +125,71 @@
 #define PCM_INT_RXR		(1 << 1)
 #define PCM_INT_TXW		(1 << 0)
 
+// DMA Controller
+#define DMA_CS(n)        ((unsigned long) dma_base + 0x100 * (n) + 0x00)
+#define DMA_CONBLK_AD(n) ((unsigned long) dma_base + 0x100 * (n) + 0x04)
+#define DMA_TI(n)        ((unsigned long) dma_base + 0x100 * (n) + 0x08)
+#define DMA_SOURCE_AD(n) ((unsigned long) dma_base + 0x100 * (n) + 0x0C)
+#define DMA_DEST_AD(n)   ((unsigned long) dma_base + 0x100 * (n) + 0x10)
+#define DMA_TXFR_LEN(n)  ((unsigned long) dma_base + 0x100 * (n) + 0x14)
+#define DMA_STRIDE(n)    ((unsigned long) dma_base + 0x100 * (n) + 0x18)
+#define DMA_NEXTCONBK(n) ((unsigned long) dma_base + 0x100 * (n) + 0x1C)
+#define DMA_DEBUG(n)     ((unsigned long) dma_base + 0x100 * (n) + 0x20)
+
+// DMA CS Register bits
+#define DMA_CS_RESET         (1 << 31)
+#define DMA_CS_ABORT         (1 << 30)
+#define DMA_CS_DISDEBUG      (1 << 29)
+#define DMA_CS_WAIT_FOR_OUTSTANDING_WRITES (1 << 28)
+#define DMA_CS_PANIC_PRIORITY_SHIFT 20
+#define DMA_CS_PRIORITY_SHIFT 16
+#define DMA_CS_ERROR         (1 << 8)
+#define DMA_CS_WAITING_FOR_OUTSTANDING_WRITES (1 << 6)
+#define DMA_CS_DREQ_STOPS_DMA (1 << 5)
+#define DMA_CS_PAUSED        (1 << 4)
+#define DMA_CS_DREQ          (1 << 3)
+#define DMA_CS_INT           (1 << 2)
+#define DMA_CS_END           (1 << 1)
+#define DMA_CS_ACTIVE        (1 << 0)
+
+// DMA TI Register bits
+#define DMA_TI_NO_WIDE_BURSTS (1 << 26)
+#define DMA_TI_WAITS_SHIFT   21
+#define DMA_TI_PERMAP_SHIFT  16
+#define DMA_TI_BURST_LENGTH_SHIFT 12
+#define DMA_TI_SRC_IGNORE    (1 << 11)
+#define DMA_TI_SRC_DREQ      (1 << 10)
+#define DMA_TI_SRC_WIDTH     (1 << 9)
+#define DMA_TI_SRC_INC       (1 << 8)
+#define DMA_TI_DEST_IGNORE   (1 << 7)
+#define DMA_TI_DEST_DREQ     (1 << 6)
+#define DMA_TI_DEST_WIDTH    (1 << 5)
+#define DMA_TI_DEST_INC      (1 << 4)
+#define DMA_TI_WAIT_RESP     (1 << 3)
+#define DMA_TI_TDMODE        (1 << 1)
+#define DMA_TI_INTEN         (1 << 0)
+
+// I2S/PCM DREQ ID
+#define DMA_DREQ_PCM_TX      2
+#define DMA_DREQ_PCM_RX      3
+
+// DMA Control Block structure (must be 32-byte aligned)
+typedef struct {
+    unsigned int ti;            // Transfer Information
+    unsigned int source_ad;     // Source address
+    unsigned int dest_ad;       // Destination address
+    unsigned int txfr_len;      // Transfer length
+    unsigned int stride;        // 2D stride
+    unsigned int nextconbk;     // Next control block
+    unsigned int reserved1;     // Reserved
+    unsigned int reserved2;     // Reserved
+} dma_cb_t;
+
 extern void *base_address;
 extern void *clks_base;
 extern void *gpio_base;
 extern void *pcm_base;
+extern void *dma_base;
 
 static inline void writel(unsigned long lp, unsigned long l)
 {

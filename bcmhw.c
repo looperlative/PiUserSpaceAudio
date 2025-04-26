@@ -49,6 +49,7 @@ void *clks_base;
 void *gpio_base;
 void *pcm_base;
 void *systemtimer_base;
+void *dma_base;
 
 static int bcmhw_get_hw_type(void)
 {
@@ -154,6 +155,15 @@ int bcmhw_init(void)
     if (pcm_base == MAP_FAILED)
     {
 	perror("pcm mmap failed");
+	close(mem_fd);
+	return -1;
+    }
+
+    // Map DMA controller registers
+    dma_base = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, BCMHW_ADDR(0x007000));
+    if (dma_base == MAP_FAILED)
+    {
+	perror("dma mmap failed");
 	close(mem_fd);
 	return -1;
     }
