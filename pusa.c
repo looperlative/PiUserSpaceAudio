@@ -86,6 +86,7 @@ int pusa_execute_in_rt(pusa_rt_func func, void *parm)
     pthread_mutex_lock(&pusa_rt_modifier_lock);
     pusa_rt_modifier_parm = parm;
     pusa_rt_modifier_func = func;
+    __sync_synchronize(); // Guarantees that previous 2 lines are done before the next line
     pusa_rt_modifier_go = 1;
 
     while (pusa_rt_modifier_go)
@@ -219,6 +220,7 @@ void *pusa_audio_thread(void *arg)
 	{
 	    pusa_rt_modifier_return = (*pusa_rt_modifier_func)(pusa_rt_modifier_parm);
 	    last_func = pusa_rt_modifier_func;
+	    __sync_synchronize(); // Guarantees that previous line is done before the next line
 	    pusa_rt_modifier_go = 0;
 	}
 
